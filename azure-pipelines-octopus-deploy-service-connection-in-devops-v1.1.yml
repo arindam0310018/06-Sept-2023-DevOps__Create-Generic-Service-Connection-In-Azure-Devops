@@ -1,0 +1,151 @@
+trigger:
+  none
+
+######################
+# Declare Parameters:-
+######################
+parameters: 
+- name: DevOpsOrganisation
+  type: string
+  default: https://dev.azure.com/ArindamMitra0251
+  values:
+  - https://dev.azure.com/ArindamMitra0251
+
+- name: DevOpsProjName
+  type: string
+  default: AMCLOUD
+  values:
+  - AMCLOUD
+
+- name: KVName
+  displayName: Please Provide the Keyvault Name:-
+  type: object
+  default: ampockv
+  values:
+  - ampockv
+
+- name: OctopusSrvConnectionName
+  type: object
+  default: AM-Octopus-Srv-Connection
+
+#######################
+# Declare Variables:-
+#######################
+variables:
+  ServiceConnection: amcloud-cicd-service-connection
+  BuildAgent: windows-latest
+  
+######################
+# Declare Build Agent:-
+######################
+pool:
+  vmImage: '$(BuildAgent)'
+
+###################
+# Declare Stages:-
+###################
+stages:
+
+- stage: Az_DevOps_Octopus_Service_Connection
+  jobs:
+  - job: Setup_Octopus_Service_Connection
+    displayName: Setup Octopus Service Connection
+    steps:
+
+########################################################
+# Install Az DevOps CLI Extension in the Build Agent:-
+#######################################################
+    - task: AzureCLI@1
+      displayName: Install Devops CLI Extension
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        scriptType: ps
+        scriptLocation: inlineScript
+        inlineScript: |
+          az extension add --name azure-devops
+          az extension show --name azure-devops --output table
+
+###############################################################
+# Help Option of Az DevOps CLI Extension in the Build Agent:-
+###############################################################
+    - task: PowerShell@2
+      displayName: Help Option of Az Devops CLI
+      inputs:
+        targetType: 'inline'
+        script: |
+          az devops -h
+
+################################        
+# Download Keyvault Secrets:-
+################################
+    - task: AzureKeyVault@2
+      displayName: Fetch all Secrets from Keyvault
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        KeyVaultName: '${{ parameters.KVName }}'
+        SecretsFilter: '*'
+        RunAsPreJob: false
+
+############################################################
+# Create Octopus Service Connection in Azure DevOps Project:-
+############################################################
+    - task: PowerShell@2
+      displayName: Create Octopus Service Connection
+      inputs:
+        targetType: 'inline'
+        script: |
+         $B64Pat = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(":$(PAT)"))
+
+         $header = @{
+          'Authorization' = 'Basic ' + $B64Pat
+          'Content-Type' = 'application/json'
+          }
+         
+         $body = '{
+            "data": {},
+            "name": "${{ parameters.OctopusSrvConnectionName }}",
+            "type": "Generic",
+            "url": "$(Octopus-URL)",
+            "authorization": {
+              "parameters": {
+                "password": "$(Octopus-API-Key)"
+              },
+              "scheme": "UsernamePassword"
+            },
+            "isShared": false,
+            "isReady": true,
+            "serviceEndpointProjectReferences": [
+              {
+                "projectReference": {
+                  "id": "$(AMCLOUD-DevOps-Prj-ID)",
+                  "name": "${{ parameters.DevOpsProjName }}"   
+                },
+                "name": "${{ parameters.OctopusSrvConnectionName }}" 
+              }
+            ]
+          }'
+         
+         $srvEndpointID = Invoke-RestMethod -Method Post -Uri ${{ parameters.DevOpsOrganisation }}/_apis/serviceendpoint/endpoints?api-version=6.0-preview.4 -Headers $header -Body $body | Select -ExpandProperty id
+
+         echo "#####################################################################################"
+         echo "Octopus Service Connection ${{ parameters.OctopusSrvConnectionName }} created successfully."
+         echo "#####################################################################################" 
+         
+         $patchbody = '{
+            "allPipelines": {
+            "authorized": true,
+            "authorizedBy": null,
+            "authorizedOn": null
+            },
+            "pipelines": null,
+            "resource": {
+                "id": "$srvEndpointID",
+                "type": "endpoint"
+            }
+          }'
+        
+          Invoke-RestMethod -Method PATCH -Uri ${{ parameters.DevOpsOrganisation }}/${{ parameters.DevOpsProjName }}/_apis/pipelines/pipelinepermissions/endpoint/"$srvEndpointID"?api-version=7.0-preview.1 -Headers $header -Body $patchbody
+
+         echo "###############################################################################################################"
+         echo "Octopus Service Connection ${{ parameters.OctopusSrvConnectionName }} was granted access permission to all Pipelines."
+         echo "###############################################################################################################"
